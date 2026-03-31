@@ -22,7 +22,7 @@ AI MarkMaster is a Chrome extension that organizes bookmarks with DeepSeek AI. I
   <img src="assets/screenshots/usage-demo-3.gif" alt="Usage Demo 3" width="32%" />
 </p>
 
-> Note: Demo images are sanitized and reset to an initialized state without personal account/history data.
+> Note: This repository is published in an initialized state, with no API keys, extension storage data, or personal usage records.
 
 ## Quick Start
 

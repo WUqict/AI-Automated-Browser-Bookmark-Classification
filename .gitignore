@@ -24,6 +24,15 @@ coverage/
 .env
 .env.*
 
+# Runtime/user data (keep repo initialized)
+*.db
+*.sqlite
+*.localstorage
+storage.local.json
+storage.sync.json
+user-data/
+chrome-profile/
+
 # Package manager lock (if not used)
 # package-lock.json
 # pnpm-lock.yaml

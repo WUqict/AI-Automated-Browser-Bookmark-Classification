@@ -22,7 +22,7 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
   <img src="assets/screenshots/usage-demo-3.gif" alt="使用效果 3" width="32%" />
 </p>
 
-> 注：演示图已做初始化与去个人化处理，不包含个人账号和历史数据。
+> 注：仓库程序以初始化状态发布，不包含任何 API Key、扩展 storage 数据或个人使用记录。
 
 ## 安装使用
 
