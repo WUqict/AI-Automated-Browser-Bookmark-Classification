@@ -18,7 +18,11 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
 
 #### 使用效果
 
-![使用效果](assets/screenshots/usage-demo.gif)
+<p align="center">
+  <img src="assets/screenshots/usage-demo.gif" alt="使用效果 1" width="32%" />
+  <img src="assets/screenshots/usage-demo-2.gif" alt="使用效果 2" width="32%" />
+  <img src="assets/screenshots/usage-demo-3.gif" alt="使用效果 3" width="32%" />
+</p>
 
 ### 安装使用
 
@@ -79,7 +83,11 @@ AI MarkMaster is a Chrome extension that organizes bookmarks with DeepSeek AI. I
 
 #### Usage Demo
 
-![Usage Demo](assets/screenshots/usage-demo.gif)
+<p align="center">
+  <img src="assets/screenshots/usage-demo.gif" alt="Usage Demo 1" width="32%" />
+  <img src="assets/screenshots/usage-demo-2.gif" alt="Usage Demo 2" width="32%" />
+  <img src="assets/screenshots/usage-demo-3.gif" alt="Usage Demo 3" width="32%" />
+</p>
 
 ### Quick Start
 
