@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "AI MarkMaster - 书签自动分类",
+  "description": "保存书签时自动调用 DeepSeek AI 进行智能分类，告别书签混乱。",
+  "version": "1.0",
+  "permissions": [
+    "bookmarks",
+    "storage",
+    "notifications",
+    "history"
+  ],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

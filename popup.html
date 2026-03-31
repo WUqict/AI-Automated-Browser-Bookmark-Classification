@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🔖 AI MarkMaster</h1>
+            <p class="subtitle">书签自动分类</p>
+        </header>
+
+        <!-- AI 智能语义搜索 -->
+        <div class="section ai-search-box">
+            <textarea id="aiSearchInput" placeholder="🤖 智能检索：描述你想找什么？比如“我最近常用的开发工具”、“用来配色的网站”..." rows="2"></textarea>
+            <button id="aiSearchBtn" class="btn-primary mt-8">✨ 呼叫 AI 帮我找</button>
+            <div id="aiSearchResults" class="search-results"></div>
+            <div class="mini-block mt-8">
+                <div class="mini-header">
+                    <span>🕘 最近浏览快捷打开</span>
+                    <button id="refreshHistoryBtn" class="btn-link" type="button">刷新</button>
+                </div>
+                <div id="recentHistoryList" class="mini-list">
+                    <p class="empty">正在加载最近浏览记录...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="section search-box">
+            <input type="text" id="searchInput" placeholder="🔍 智能模糊搜索（标题/域名/路径）..." autocomplete="off">
+            <div id="searchResults" class="search-results"></div>
+        </div>
+
+        <!-- 卡片式设置抽屉 -->
+        <details class="settings-drawer">
+            <summary>⚙️ 插件设置与分类规则</summary>
+            <div class="drawer-content">
+                <!-- 开关 -->
+                <div class="row switch-row">
+                    <span>自动分类</span>
+                    <label class="switch">
+                        <input type="checkbox" id="enableToggle" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <!-- API Key -->
+                <div class="section">
+                    <label for="apiKey">DeepSeek API Key</label>
+                    <input type="password" id="apiKey" placeholder="sk-...">
+                </div>
+
+                <!-- 分类列表 -->
+                <div class="section">
+                    <label for="categories">分类列表 <span class="hint">(每行一个)</span></label>
+                    <textarea id="categories" rows="6" spellcheck="false"></textarea>
+                </div>
+
+                <!-- 保存按钮 -->
+                <button id="saveBtn" class="btn-primary">💾 保存设置</button>
+                <div id="saveMsg" class="save-msg"></div>
+
+                <!-- 历史整理按钮 -->
+                <button id="organizeBtn" class="btn-secondary mt-5">🧹 一键整理历史旧书签</button>
+                <div id="organizeMsg" class="save-msg text-highlight"></div>
+
+                <div class="section mt-8">
+                    <label>📂 文件夹重整（自动扫描全部文件夹）</label>
+                    <button id="folderRecheckBtn" class="btn-secondary mt-8">♻️ 一键重整全部文件夹</button>
+                    <div id="folderRecheckMsg" class="save-msg text-highlight"></div>
+                </div>
+            </div>
+        </details>
+
+        <!-- 最近记录 -->
+        <div class="section">
+            <label>最近分类记录</label>
+            <div id="logList" class="log-list">
+                <p class="empty">暂无记录</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="mini-header">
+                <label>🧩 待人工分类（AI 不确定）</label>
+                <button id="refreshPendingBtn" class="btn-link" type="button">刷新</button>
+            </div>
+            <div id="pendingList" class="log-list">
+                <p class="empty">正在加载待分类书签...</p>
+            </div>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+
+</html>
