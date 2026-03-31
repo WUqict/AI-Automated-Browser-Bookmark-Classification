@@ -1,12 +1,10 @@
 # AI MarkMaster Extension
 
-[简体中文](#简体中文) | [English](#english)
-
-## 简体中文
+[English README](README.en.md)
 
 AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，支持自动分类、低置信度保护、历史重整和语义检索。
 
-### 功能亮点
+## 功能亮点
 
 - 自动分类：新建书签后自动识别并移动到目标文件夹。
 - 低置信度保护：不确定结果会进入 `待二次判断`，避免误分。
@@ -14,9 +12,9 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
 - 历史重整：支持一键整理历史书签和按文件夹重整。
 - 规则学习：高置信度结果会逐步沉淀域名规则，减少重复判断。
 
-### 截图展示
+## 截图展示
 
-#### 使用效果
+### 使用效果
 
 <p align="center">
   <img src="assets/screenshots/usage-demo.gif" alt="使用效果 1" width="32%" />
@@ -24,7 +22,9 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
   <img src="assets/screenshots/usage-demo-3.gif" alt="使用效果 3" width="32%" />
 </p>
 
-### 安装使用
+> 注：演示图已做初始化与去个人化处理，不包含个人账号和历史数据。
+
+## 安装使用
 
 1. 克隆或下载本仓库。
 2. 打开 Chrome，访问 `chrome://extensions/`。
@@ -32,7 +32,7 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
 4. 点击“加载已解压的扩展程序”，选择本项目目录。
 5. 打开扩展弹窗，填写 DeepSeek API Key。
 
-### 隐私与权限
+## 隐私与权限
 
 - 权限：`bookmarks`、`history`、`storage`、`notifications`。
 - 网络：访问 DeepSeek API，以及目标网页公开 HTML 信号（用于分类）。
@@ -40,7 +40,7 @@ AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，
 - 自动分类/重整：发送当前书签及必要页面信号（标题、域名等）。
 - AI 检索：发送本地书签样本（当前实现最多约 1000 条标题+URL）用于语义匹配。
 
-### 开发检查
+## 开发检查
 
 ```bash
 node --check background.js
@@ -48,7 +48,7 @@ node --check popup.js
 node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console.log('manifest ok')"
 ```
 
-### 项目结构
+## 项目结构
 
 ```text
 .
@@ -67,47 +67,9 @@ node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8')); console
 
 更多规划见 [docs/ROADMAP.zh-CN.md](docs/ROADMAP.zh-CN.md)。
 
-## English
+## 贡献
 
-AI MarkMaster is a Chrome extension that organizes bookmarks with DeepSeek AI. It supports auto-categorization, low-confidence protection, historical re-organization, and semantic search.
-
-### Highlights
-
-- Auto categorize newly created bookmarks.
-- Low-confidence results go to `待二次判断` to avoid wrong moves.
-- Fuzzy local search + AI semantic search.
-- One-click re-organization for old bookmarks or specific folders.
-- Domain rule learning from high-confidence results.
-
-### Screenshots
-
-#### Usage Demo
-
-<p align="center">
-  <img src="assets/screenshots/usage-demo.gif" alt="Usage Demo 1" width="32%" />
-  <img src="assets/screenshots/usage-demo-2.gif" alt="Usage Demo 2" width="32%" />
-  <img src="assets/screenshots/usage-demo-3.gif" alt="Usage Demo 3" width="32%" />
-</p>
-
-### Quick Start
-
-1. Clone this repository.
-2. Open Chrome and go to `chrome://extensions/`.
-3. Enable Developer mode.
-4. Click “Load unpacked” and select this project folder.
-5. Open the extension popup and set your DeepSeek API key.
-
-### Privacy & Permissions
-
-- Permissions: `bookmarks`, `history`, `storage`, `notifications`.
-- Network access: DeepSeek API + public page HTML signals for classification.
-- API key is currently stored in `chrome.storage.sync`.
-- Auto classify/reorganize sends current bookmark data and minimal page signals.
-- AI search sends a local bookmark sample (up to ~1000 title+URL items).
-
-## Contributing
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+提交 PR 前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 
