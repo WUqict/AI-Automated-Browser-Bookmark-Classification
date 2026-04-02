@@ -1,6 +1,7 @@
 # AI MarkMaster Extension
 
 [English README](README.en.md)
+[更新日志](CHANGELOG.md)
 
 AI MarkMaster 是一个 Chrome 扩展，使用 DeepSeek AI 自动整理书签，支持自动分类、低置信度保护、历史重整和语义检索。
 
