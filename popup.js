@@ -76,6 +76,16 @@ function showMsg(text, isError = false) {
     setTimeout(() => { $saveMsg.textContent = ""; }, 2200);
 }
 
+function isBookmarkNotFoundError(err) {
+    const msg = String(err?.message || err || "").toLowerCase();
+    return (
+        msg.includes("can't find bookmark for id") ||
+        msg.includes("cannot find bookmark for id") ||
+        msg.includes("书签不存在") ||
+        (msg.includes("bookmark") && msg.includes("id") && msg.includes("find"))
+    );
+}
+
 function openSecureUrl(urlStr, { clearSearch = false } = {}) {
     try {
         const parsedUrl = new URL(urlStr);
@@ -583,6 +593,15 @@ $pendingList.addEventListener("click", async (e) => {
                 $pendingList.innerHTML = '<p class="empty">暂无待人工分类项目</p>';
             }
         } catch (err) {
+            if (isBookmarkNotFoundError(err)) {
+                item.remove();
+                if (!$pendingList.querySelector(".pending-item")) {
+                    $pendingList.innerHTML = '<p class="empty">暂无待人工分类项目</p>';
+                }
+                showMsg("⚠️ 该书签已不存在，列表已自动刷新", true);
+                loadPendingBookmarks();
+                return;
+            }
             btn.disabled = false;
             btn.textContent = "归类";
             showMsg(`❌ ${err.message || "人工分类失败"}`, true);

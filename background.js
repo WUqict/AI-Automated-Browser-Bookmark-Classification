@@ -425,11 +425,31 @@ async function getBookmarksChildren(parentId) {
   });
 }
 
+function getErrorMessage(err) {
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  return err.message || String(err);
+}
+
+function isBookmarkNotFoundError(err) {
+  const msg = getErrorMessage(err).toLowerCase();
+  return (
+    msg.includes("can't find bookmark for id") ||
+    msg.includes("cannot find bookmark for id") ||
+    (msg.includes("bookmark") && msg.includes("id") && msg.includes("find"))
+  );
+}
+
 async function getBookmarkNode(id) {
   return new Promise((resolve, reject) => {
     chrome.bookmarks.get(id, (results) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
+        const message = chrome.runtime.lastError.message || "";
+        if (isBookmarkNotFoundError(message)) {
+          resolve(null);
+          return;
+        }
+        reject(new Error(message));
       } else {
         resolve(results?.[0] || null);
       }
@@ -1164,7 +1184,13 @@ async function getPendingBookmarks(limit = MAX_PENDING_FETCH) {
   const pendingFolder = await findFolderByTitle(LOW_CONFIDENCE_FOLDER, "2");
   if (!pendingFolder) return [];
 
-  const bookmarks = await getBookmarksInFolder(pendingFolder.id);
+  let bookmarks = [];
+  try {
+    bookmarks = await getBookmarksInFolder(pendingFolder.id);
+  } catch (err) {
+    if (isBookmarkNotFoundError(err)) return [];
+    throw err;
+  }
   return bookmarks
     .sort((a, b) => (b.dateAdded || 0) - (a.dateAdded || 0))
     .slice(0, limit)
@@ -1182,14 +1208,28 @@ async function manualClassifyBookmark(bookmarkId, category, newTitle = "") {
   const categories = settings.categories || DEFAULT_CATEGORIES;
   const pickedCategory = pickCategory(category, categories);
   const bookmark = await getBookmarkNode(bookmarkId);
-  if (!bookmark || !bookmark.url) throw new Error("书签不存在");
+  if (!bookmark || !bookmark.url) throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
 
   const targetFolderId = await findOrCreateFolder(pickedCategory, "2");
-  await moveBookmark(bookmark.id, targetFolderId);
+  try {
+    await moveBookmark(bookmark.id, targetFolderId);
+  } catch (err) {
+    if (isBookmarkNotFoundError(err)) {
+      throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
+    }
+    throw err;
+  }
 
   const finalTitle = cleanText(newTitle) || bookmark.title;
   if (finalTitle !== bookmark.title) {
-    await updateBookmarkTitle(bookmark.id, finalTitle);
+    try {
+      await updateBookmarkTitle(bookmark.id, finalTitle);
+    } catch (err) {
+      if (isBookmarkNotFoundError(err)) {
+        throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
+      }
+      throw err;
+    }
   }
 
   const domain = extractDomain(bookmark.url);
