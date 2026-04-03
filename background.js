@@ -14,6 +14,7 @@ const MAX_HTML_SIZE = 200000;
 const RULE_MIN_SAMPLES = 5;
 const RULE_MIN_RATIO = 0.8;
 const MAX_PENDING_FETCH = 60;
+const API_REQUEST_TIMEOUT_MS = 20000;
 
 // ============ 获取设置 ============
 async function getSettings() {
@@ -32,11 +33,18 @@ async function getLocalSettings(defaults) {
 }
 
 // ============ 保存日志 ============
+let logWriteQueue = Promise.resolve();
 async function addLog(entry) {
-  const { recentLogs } = await getSettings();
-  recentLogs.unshift(entry);
-  if (recentLogs.length > 20) recentLogs.length = 20;
-  chrome.storage.sync.set({ recentLogs });
+  logWriteQueue = logWriteQueue
+    .then(async () => {
+      const { recentLogs = [] } = await getSettings();
+      const nextLogs = [entry, ...recentLogs].slice(0, 20);
+      await new Promise((resolve) => chrome.storage.sync.set({ recentLogs: nextLogs }, resolve));
+    })
+    .catch((err) => {
+      console.warn("写入 recentLogs 失败:", err);
+    });
+  return logWriteQueue;
 }
 
 function cleanText(text) {
@@ -314,6 +322,29 @@ function normalizeAiResult(rawResult, categories, title) {
   };
 }
 
+async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch("https://api.deepseek.com/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error("请求超时，请稍后重试");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // ============ 调用 DeepSeek API（结构化输入） ============
 async function classifyBookmark(url, title, apiKey, categories, pageSignals) {
   const catStr = categories.join("、");
@@ -344,21 +375,14 @@ ${JSON.stringify({
     signal_fallback_reason: pageSignals.fallback_reason || ""
   })}`;
 
-  const response = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      temperature: 0.1,
-      response_format: { type: "json_object" }
-    })
+  const response = await requestDeepSeekChat(apiKey, {
+    model: "deepseek-chat",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.1,
+    response_format: { type: "json_object" }
   });
 
   if (!response.ok) {
@@ -385,21 +409,14 @@ ${catStr}
 
   const userPrompt = `URL: ${url}\n标题: ${title}`;
 
-  const response = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      temperature: 0.1,
-      response_format: { type: "json_object" }
-    })
+  const response = await requestDeepSeekChat(apiKey, {
+    model: "deepseek-chat",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt }
+    ],
+    temperature: 0.1,
+    response_format: { type: "json_object" }
   });
 
   if (!response.ok) {
@@ -796,8 +813,9 @@ async function extractUnclassifiedBookmarks(categories) {
 
       function traverse(node, path) {
         if (node.url) {
-          // 如果书签所在的父目录刚好在我们的设定分类中，则跳过
-          if (!catSet.has(path[path.length - 1])) {
+          // 只要路径中任一层命中分类目录，都认为已被归类，避免重整时误搬子目录书签
+          const isUnderCategoryFolder = path.some((part) => catSet.has(cleanText(part)));
+          if (!isUnderCategoryFolder) {
             allMarks.push({ id: node.id, url: node.url, title: node.title });
           }
         } else if (node.children) {
@@ -839,6 +857,7 @@ async function doFullOrganize() {
   // 按照比如 20 条一批发送（此处简单为了降低单次请求量可使用 20 的批次）
   const BATCH_SIZE = 20;
   let processedCount = 0;
+  let failedCount = 0;
 
   updateProgress({ isProcessing: true, message: `开始处理...`, progress: 0, total });
 
@@ -857,15 +876,11 @@ async function doFullOrganize() {
     const userPrompt = `请处理以下 ${batchData.length} 条书签：\n${JSON.stringify(batchData)}`;
 
     try {
-      const res = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}` },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-          temperature: 0.1,
-          response_format: { type: "json_object" }
-        })
+      const res = await requestDeepSeekChat(settings.apiKey, {
+        model: "deepseek-chat",
+        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
+        temperature: 0.1,
+        response_format: { type: "json_object" }
       });
 
       if (!res.ok) throw new Error(`API ${res.status}`);
@@ -884,21 +899,42 @@ async function doFullOrganize() {
           const folderId = await findOrCreateFolder(cat, "2");
           await moveBookmark(bm.id, folderId);
           if (nTitle !== bm.title) await updateBookmarkTitle(bm.id, nTitle);
-        } catch (e) { console.warn("移动书签失败", bm.url, e); }
+        } catch (e) {
+          failedCount += 1;
+          console.warn("移动书签失败", bm.url, e);
+        }
 
         processedCount++;
-        updateProgress({ isProcessing: true, message: `🚀 正在清洗书签...`, progress: processedCount, total });
+        updateProgress({
+          isProcessing: true,
+          message: failedCount > 0 ? `🚀 正在清洗书签...（失败 ${failedCount}）` : "🚀 正在清洗书签...",
+          progress: processedCount,
+          total,
+          failed: failedCount
+        });
       }
 
     } catch (err) {
       console.error("批处理失败", err);
-      // 若某批失败了，跳过，只记录进度
+      // 若某批失败，记录失败数量并推进进度，最终明确提示“部分失败”
+      failedCount += batch.length;
       processedCount += batch.length;
+      updateProgress({
+        isProcessing: true,
+        message: `⚠️ 批处理失败，已跳过 ${batch.length} 条（累计失败 ${failedCount}）`,
+        progress: processedCount,
+        total,
+        failed: failedCount
+      });
     }
   }
 
-  updateProgress({ isProcessing: false, message: `🎉 历史书签已全部分类完毕！` });
-  notify("✅ 整理完成", `共处理 ${total} 条书签`);
+  const successCount = Math.max(total - failedCount, 0);
+  const finishMsg = failedCount > 0
+    ? `⚠️ 整理完成：成功 ${successCount}，失败 ${failedCount}`
+    : `🎉 历史书签已全部分类完毕！共处理 ${total} 条`;
+  updateProgress({ isProcessing: false, message: finishMsg, progress: total, total, failed: failedCount });
+  notify(failedCount > 0 ? "⚠️ 整理完成（部分失败）" : "✅ 整理完成", finishMsg);
 }
 
 async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categories, onItemDone) {
@@ -909,8 +945,8 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
   for (const bookmark of bookmarks) {
     try {
       const detail = await classifyBookmarkSmart(bookmark, settings, categories);
-      const parentFolderName = bookmark.currentFolderName || "";
-      const shouldKeep = detail.highConfidence && detail.suggestedCategory === parentFolderName;
+      const reorganizeTargetName = cleanText(folder?.title || "");
+      const shouldKeep = detail.highConfidence && detail.suggestedCategory === reorganizeTargetName;
 
       if (shouldKeep) {
         kept += 1;
