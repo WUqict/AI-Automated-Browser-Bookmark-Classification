@@ -804,12 +804,7 @@ async function rebuildBookmarkUrlIndex(reason = "manual") {
   bookmarkUrlIndexDirty = false;
   bookmarkUrlIndexBuiltAt = Date.now();
 
-  appendDiagnosticError(new Error("bookmark_index_rebuilt"), {
-    module: "background",
-    action: "bookmark_index",
-    stage: "rebuilt",
-    details: `reason=${reason}; url_count=${nextIndex.size}`
-  }).catch(() => {});
+  console.info("[bookmark_index] rebuilt", { reason, urlCount: nextIndex.size });
 
   return nextIndex;
 }
