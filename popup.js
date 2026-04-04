@@ -783,7 +783,8 @@ $pendingList.addEventListener("click", async (e) => {
             await sendRuntimeMessage({
                 action: "manualClassifyBookmark",
                 bookmarkId,
-                category
+                category,
+                bookmarkUrl: item.dataset.url || ""
             });
 
             item.remove();

@@ -16,6 +16,13 @@ const RULE_MIN_RATIO = 0.8;
 const MAX_PENDING_FETCH = 60;
 const API_REQUEST_TIMEOUT_MS = 20000;
 const MAX_ERROR_DIAGNOSTICS = 80;
+const BOOKMARK_INDEX_MAX_AGE_MS = 2 * 60 * 1000;
+const BOOKMARK_ID_REPAIR_CACHE_LIMIT = 800;
+
+let bookmarkUrlIndexCache = new Map();
+let bookmarkUrlIndexDirty = true;
+let bookmarkUrlIndexBuiltAt = 0;
+const bookmarkIdRepairCache = new Map();
 
 // ============ 获取设置 ============
 async function getSettings() {
@@ -643,6 +650,84 @@ async function getBookmarkNode(id) {
   });
 }
 
+async function searchBookmarksByUrl(url) {
+  if (!url) return [];
+  return new Promise((resolve, reject) => {
+    chrome.bookmarks.search({ url }, (results) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve((results || []).filter((item) => !!item?.url));
+      }
+    });
+  });
+}
+
+async function recoverBookmarkIdByUrl(bookmarkId, bookmarkUrl, bookmarkTitle = "", action = "unknown") {
+  if (!bookmarkUrl) return "";
+  const sourceId = cleanText(bookmarkId || "");
+
+  // First, try a previously repaired id mapping.
+  const rememberedId = getRememberedBookmarkId(sourceId);
+  if (rememberedId) {
+    const rememberedNode = await getBookmarkNode(rememberedId);
+    if (rememberedNode?.url === bookmarkUrl) {
+      return rememberedId;
+    }
+  }
+
+  let candidates = [];
+  try {
+    const index = await ensureBookmarkUrlIndex("recoverBookmarkIdByUrl");
+    const indexed = index.get(bookmarkUrl) || [];
+    candidates = indexed.map((item) => ({
+      id: item.id,
+      title: item.title,
+      url: bookmarkUrl,
+      dateAdded: item.dateAdded,
+      parentId: item.parentId
+    }));
+
+    if (candidates.length === 0) {
+      candidates = await searchBookmarksByUrl(bookmarkUrl);
+    }
+  } catch (err) {
+    appendDiagnosticError(err, {
+      module: "background",
+      action: "recoverBookmarkIdByUrl",
+      stage: "search_failed",
+      details: `from_action=${action}`,
+      bookmarkTitle,
+      bookmarkUrl
+    }).catch(() => {});
+    return "";
+  }
+
+  const exactUrl = candidates.filter((item) => item.url === bookmarkUrl);
+  if (exactUrl.length === 0) return "";
+
+  const byTitle = bookmarkTitle
+    ? exactUrl.filter((item) => cleanText(item.title) === cleanText(bookmarkTitle))
+    : [];
+  const pool = byTitle.length > 0 ? byTitle : exactUrl;
+  const picked = [...pool].sort((a, b) => (b.dateAdded || 0) - (a.dateAdded || 0))[0];
+  const recoveredId = cleanText(picked?.id || "");
+  if (!recoveredId) return "";
+  rememberBookmarkIdRepair(sourceId, recoveredId);
+
+  if (recoveredId !== sourceId) {
+    appendDiagnosticError(new Error("bookmark_id_recovered"), {
+      module: "background",
+      action: "bookmark_id_recovery",
+      stage: "recovered_by_url",
+      details: `from_action=${action}; old_id=${sourceId}; new_id=${recoveredId}`,
+      bookmarkTitle: bookmarkTitle || picked?.title || "",
+      bookmarkUrl
+    }).catch(() => {});
+  }
+  return recoveredId;
+}
+
 async function getBookmarkSubTree(id) {
   return new Promise((resolve, reject) => {
     chrome.bookmarks.getSubTree(id, (results) => {
@@ -665,6 +750,76 @@ async function getBookmarkTree() {
       }
     });
   });
+}
+
+function markBookmarkIndexDirty() {
+  bookmarkUrlIndexDirty = true;
+}
+
+function rememberBookmarkIdRepair(oldId, newId) {
+  const fromId = cleanText(oldId || "");
+  const toId = cleanText(newId || "");
+  if (!fromId || !toId || fromId === toId) return;
+  bookmarkIdRepairCache.set(fromId, toId);
+  if (bookmarkIdRepairCache.size > BOOKMARK_ID_REPAIR_CACHE_LIMIT) {
+    const oldestKey = bookmarkIdRepairCache.keys().next().value;
+    if (oldestKey) bookmarkIdRepairCache.delete(oldestKey);
+  }
+}
+
+function getRememberedBookmarkId(oldId) {
+  return cleanText(bookmarkIdRepairCache.get(cleanText(oldId || "")) || "");
+}
+
+async function rebuildBookmarkUrlIndex(reason = "manual") {
+  const tree = await getBookmarkTree();
+  const nextIndex = new Map();
+
+  function walk(node) {
+    if (!node) return;
+    if (node.url) {
+      const url = cleanText(node.url);
+      if (url) {
+        const list = nextIndex.get(url) || [];
+        list.push({
+          id: cleanText(node.id || ""),
+          title: cleanText(node.title || ""),
+          dateAdded: Number(node.dateAdded || 0),
+          parentId: cleanText(node.parentId || "")
+        });
+        nextIndex.set(url, list);
+      }
+      return;
+    }
+    for (const child of (node.children || [])) {
+      walk(child);
+    }
+  }
+
+  for (const root of tree) {
+    walk(root);
+  }
+
+  bookmarkUrlIndexCache = nextIndex;
+  bookmarkUrlIndexDirty = false;
+  bookmarkUrlIndexBuiltAt = Date.now();
+
+  appendDiagnosticError(new Error("bookmark_index_rebuilt"), {
+    module: "background",
+    action: "bookmark_index",
+    stage: "rebuilt",
+    details: `reason=${reason}; url_count=${nextIndex.size}`
+  }).catch(() => {});
+
+  return nextIndex;
+}
+
+async function ensureBookmarkUrlIndex(reason = "auto") {
+  const expired = Date.now() - bookmarkUrlIndexBuiltAt > BOOKMARK_INDEX_MAX_AGE_MS;
+  if (bookmarkUrlIndexDirty || !bookmarkUrlIndexCache.size || expired) {
+    await rebuildBookmarkUrlIndex(reason);
+  }
+  return bookmarkUrlIndexCache;
 }
 
 async function findFolderByTitle(folderName, parentId = "2") {
@@ -801,11 +956,24 @@ async function classifyBookmarkSmart(bookmark, settings, categories) {
 
 async function applyBookmarkClassification(bookmarkId, bookmarkUrl, bookmarkOriginalTitle, detail) {
   const folderId = await findOrCreateFolder(detail.targetFolderName, "2");
-  await moveBookmark(bookmarkId, folderId);
+  const movedNode = await moveBookmarkWithRecovery(
+    bookmarkId,
+    folderId,
+    bookmarkUrl,
+    bookmarkOriginalTitle,
+    "applyBookmarkClassification.move"
+  );
+  const effectiveBookmarkId = cleanText(movedNode?.id || bookmarkId);
 
   if (detail.highConfidence && detail.newTitle !== bookmarkOriginalTitle) {
     try {
-      await updateBookmarkTitle(bookmarkId, detail.newTitle);
+      await updateBookmarkTitleWithRecovery(
+        effectiveBookmarkId,
+        detail.newTitle,
+        bookmarkUrl,
+        bookmarkOriginalTitle,
+        "applyBookmarkClassification.update_title"
+      );
     } catch (err) {
       if (!isBookmarkNotFoundError(err)) throw err;
     }
@@ -873,6 +1041,19 @@ async function moveBookmark(bookmarkId, targetFolderId) {
     });
   });
 }
+async function moveBookmarkWithRecovery(bookmarkId, targetFolderId, bookmarkUrl = "", bookmarkTitle = "", action = "move") {
+  try {
+    return await moveBookmark(bookmarkId, targetFolderId);
+  } catch (err) {
+    if (!isBookmarkNotFoundError(err)) throw err;
+    const recoveredId = await recoverBookmarkIdByUrl(bookmarkId, bookmarkUrl, bookmarkTitle, action);
+    if (!recoveredId || recoveredId === cleanText(bookmarkId || "")) {
+      throw err;
+    }
+    rememberBookmarkIdRepair(bookmarkId, recoveredId);
+    return moveBookmark(recoveredId, targetFolderId);
+  }
+}
 
 // ============ 更新书签标题 ============
 async function updateBookmarkTitle(bookmarkId, newTitle) {
@@ -885,6 +1066,19 @@ async function updateBookmarkTitle(bookmarkId, newTitle) {
       }
     });
   });
+}
+async function updateBookmarkTitleWithRecovery(bookmarkId, newTitle, bookmarkUrl = "", bookmarkTitle = "", action = "update_title") {
+  try {
+    return await updateBookmarkTitle(bookmarkId, newTitle);
+  } catch (err) {
+    if (!isBookmarkNotFoundError(err)) throw err;
+    const recoveredId = await recoverBookmarkIdByUrl(bookmarkId, bookmarkUrl, bookmarkTitle, action);
+    if (!recoveredId || recoveredId === cleanText(bookmarkId || "")) {
+      throw err;
+    }
+    rememberBookmarkIdRepair(bookmarkId, recoveredId);
+    return updateBookmarkTitle(recoveredId, newTitle);
+  }
 }
 
 // ============ 发送通知 ============
@@ -903,6 +1097,7 @@ const processingIds = new Set();
 
 // ============ 核心：监听书签创建 ============
 chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
+  markBookmarkIndexDirty();
   // 忽略文件夹（没有 url 的是文件夹）
   if (!bookmark.url) return;
 
@@ -1086,8 +1281,23 @@ async function doFullOrganize() {
 
         try {
           const folderId = await findOrCreateFolder(cat, "2");
-          await moveBookmark(bm.id, folderId);
-          if (nTitle !== bm.title) await updateBookmarkTitle(bm.id, nTitle);
+          const movedNode = await moveBookmarkWithRecovery(
+            bm.id,
+            folderId,
+            bm.url,
+            bm.title,
+            "doFullOrganize.move"
+          );
+          const effectiveBookmarkId = cleanText(movedNode?.id || bm.id);
+          if (nTitle !== bm.title) {
+            await updateBookmarkTitleWithRecovery(
+              effectiveBookmarkId,
+              nTitle,
+              bm.url,
+              bm.title,
+              "doFullOrganize.update_title"
+            );
+          }
         } catch (e) {
           failedCount += 1;
           lastError = buildRecheckError(e, "历史整理-移动书签", "", bm);
@@ -1560,16 +1770,35 @@ async function getPendingBookmarks(limit = MAX_PENDING_FETCH) {
     }));
 }
 
-async function manualClassifyBookmark(bookmarkId, category, newTitle = "") {
+async function manualClassifyBookmark(bookmarkId, category, newTitle = "", bookmarkUrl = "") {
   const settings = await getSettings();
   const categories = settings.categories || DEFAULT_CATEGORIES;
   const pickedCategory = pickCategory(category, categories);
-  const bookmark = await getBookmarkNode(bookmarkId);
-  if (!bookmark || !bookmark.url) throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
+
+  let effectiveBookmarkId = bookmarkId;
+  let bookmark = await getBookmarkNode(effectiveBookmarkId);
+  if ((!bookmark || !bookmark.url) && bookmarkUrl) {
+    const recoveredId = await recoverBookmarkIdByUrl(bookmarkId, bookmarkUrl, "", "manualClassifyBookmark.get");
+    if (recoveredId) {
+      effectiveBookmarkId = recoveredId;
+      bookmark = await getBookmarkNode(effectiveBookmarkId);
+    }
+  }
+
+  if (!bookmark || !bookmark.url) {
+    throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
+  }
 
   const targetFolderId = await findOrCreateFolder(pickedCategory, "2");
   try {
-    await moveBookmark(bookmark.id, targetFolderId);
+    const movedNode = await moveBookmarkWithRecovery(
+      bookmark.id,
+      targetFolderId,
+      bookmark.url,
+      bookmark.title,
+      "manualClassifyBookmark.move"
+    );
+    effectiveBookmarkId = cleanText(movedNode?.id || bookmark.id);
   } catch (err) {
     if (isBookmarkNotFoundError(err)) {
       throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
@@ -1580,7 +1809,13 @@ async function manualClassifyBookmark(bookmarkId, category, newTitle = "") {
   const finalTitle = cleanText(newTitle) || bookmark.title;
   if (finalTitle !== bookmark.title) {
     try {
-      await updateBookmarkTitle(bookmark.id, finalTitle);
+      await updateBookmarkTitleWithRecovery(
+        effectiveBookmarkId,
+        finalTitle,
+        bookmark.url,
+        bookmark.title,
+        "manualClassifyBookmark.update_title"
+      );
     } catch (err) {
       if (isBookmarkNotFoundError(err)) {
         throw new Error("书签不存在，可能已被移动或删除，请刷新后重试");
@@ -1611,7 +1846,6 @@ async function manualClassifyBookmark(bookmarkId, category, newTitle = "") {
 
   return { success: true, category: pickedCategory, title: finalTitle };
 }
-
 // 接收来自 Popup 的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "getErrorDiagnostics") {
@@ -1776,7 +2010,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === "manualClassifyBookmark") {
-    manualClassifyBookmark(request.bookmarkId, request.category, request.newTitle || "")
+    manualClassifyBookmark(request.bookmarkId, request.category, request.newTitle || "", request.bookmarkUrl || "")
       .then((result) => sendResponse(result))
       .catch((err) => {
         reportDiagnosticError(err, {
@@ -1879,12 +2113,46 @@ async function handleAiSearch(query) {
 }
 
 // ============ 扩展安装时初始化 ============
+chrome.bookmarks.onRemoved.addListener(() => {
+  markBookmarkIndexDirty();
+});
+
+chrome.bookmarks.onMoved.addListener(() => {
+  markBookmarkIndexDirty();
+});
+
+chrome.bookmarks.onChanged.addListener(() => {
+  markBookmarkIndexDirty();
+});
+
+chrome.bookmarks.onImportBegan.addListener(() => {
+  markBookmarkIndexDirty();
+  appendDiagnosticError(new Error("bookmark_import_began"), {
+    module: "background",
+    action: "bookmark_import",
+    stage: "begin"
+  }).catch(() => {});
+});
+
+chrome.bookmarks.onImportEnded.addListener(() => {
+  markBookmarkIndexDirty();
+  rebuildBookmarkUrlIndex("import_ended")
+    .catch((err) => {
+      appendDiagnosticError(err, {
+        module: "background",
+        action: "bookmark_import",
+        stage: "rebuild_failed"
+      }).catch(() => {});
+    });
+});
 chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.sync.get({ categories: null }, (items) => {
     if (!items.categories) {
       chrome.storage.sync.set({ categories: DEFAULT_CATEGORIES, enabled: true, recentLogs: [], domainRules: {}, ruleStats: {} });
     }
   });
+  markBookmarkIndexDirty();
+  rebuildBookmarkUrlIndex("extension_installed").catch(() => {});
   updateProgress({ isProcessing: false });
   updateFolderRecheckState({ isProcessing: false });
 });

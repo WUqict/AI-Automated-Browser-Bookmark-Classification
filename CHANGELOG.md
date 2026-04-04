@@ -10,6 +10,8 @@
 - Added background message handlers: `getErrorDiagnostics`, `clearErrorDiagnostics`, and `reportClientError`.
 - Added global background fallback capture for `unhandledrejection` and `error` events.
 - Added diagnostics tracing in AI search and real-time bookmark classification flows.
+- Added bookmark ID auto-repair by URL with retry wrappers for `move` and `update`.
+- Added import-aware index rebuild via bookmark import lifecycle listeners to improve stale ID recovery after external imports.
 
 ## 2026-04-03
 
