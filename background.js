@@ -324,6 +324,10 @@ function normalizeAiResult(rawResult, categories, title) {
 }
 
 async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIMEOUT_MS, context = {}) {
+  const token = cleanText(apiKey || "");
+  if (!token) {
+    throw new Error("API Key 为空，请先在设置中保存有效的 DeepSeek API Key");
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -331,7 +335,7 @@ async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIME
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        "Authorization": `Bearer ${token}`
       },
       body: JSON.stringify(payload),
       signal: controller.signal
@@ -358,6 +362,28 @@ async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIME
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function sanitizeApiErrorText(text) {
+  const raw = cleanText(text || "");
+  if (!raw) return "";
+  return raw
+    .replace(/sk-[a-z0-9_-]{8,}/ig, "sk-***")
+    .replace(/(api[\s_-]*key\s*[:=]\s*)([^,}\\s"']+)/ig, "$1***");
+}
+
+function buildApiHttpError(status, errText) {
+  const safeText = sanitizeApiErrorText(errText).slice(0, 260);
+  let message = `API 请求失败 (${status})`;
+  if (status === 401) message = "API Key 错误、已失效或无权限 (401)";
+  if (status === 402) message = "API 余额不足或账户额度受限 (402)";
+  if (status === 429) message = "请求过于频繁，请稍后重试 (429)";
+  if (safeText) {
+    message += ` | ${safeText}`;
+  }
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 // ============ 调用 DeepSeek API（结构化输入） ============
@@ -402,12 +428,12 @@ ${JSON.stringify({
 
   if (!response.ok) {
     const errText = await response.text();
-    const apiErr = new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    const apiErr = buildApiHttpError(response.status, errText);
     await appendDiagnosticError(apiErr, {
       module: "background",
       action: "classifyBookmark",
       stage: "http_error",
-      details: `status=${response.status}`
+      details: `status=${response.status} body=${sanitizeApiErrorText(errText).slice(0, 120)}`
     });
     throw apiErr;
   }
@@ -443,12 +469,12 @@ ${catStr}
 
   if (!response.ok) {
     const errText = await response.text();
-    const apiErr = new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    const apiErr = buildApiHttpError(response.status, errText);
     await appendDiagnosticError(apiErr, {
       module: "background",
       action: "classifyBookmarkFallback",
       stage: "http_error",
-      details: `status=${response.status}`
+      details: `status=${response.status} body=${sanitizeApiErrorText(errText).slice(0, 120)}`
     });
     throw apiErr;
   }
@@ -778,7 +804,11 @@ async function applyBookmarkClassification(bookmarkId, bookmarkUrl, bookmarkOrig
   await moveBookmark(bookmarkId, folderId);
 
   if (detail.highConfidence && detail.newTitle !== bookmarkOriginalTitle) {
-    await updateBookmarkTitle(bookmarkId, detail.newTitle);
+    try {
+      await updateBookmarkTitle(bookmarkId, detail.newTitle);
+    } catch (err) {
+      if (!isBookmarkNotFoundError(err)) throw err;
+    }
   }
 
   await addLog({
@@ -1148,7 +1178,19 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
         });
       }
     } catch (err) {
-      console.warn("文件夹重整分类失败:", bookmark.url, err);
+      if (isBookmarkNotFoundError(err)) {
+        appendDiagnosticError(err, {
+          module: "background",
+          action: "reorganizeBookmarksInFolder",
+          stage: "bookmark_missing",
+          folderName,
+          bookmarkTitle: bookmark.title,
+          bookmarkUrl: bookmark.url
+        }).catch(() => {});
+        continue;
+      }
+
+      console.warn("文件夹重整分类失败", bookmark.url, err);
       pending += 1;
       errorCount += 1;
       lastError = buildRecheckError(err, "分类判定", folderName, bookmark);
@@ -1156,10 +1198,11 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
         module: "background",
         action: "reorganizeBookmarksInFolder",
         stage: "classify",
-        folderName: folderName,
+        folderName,
         bookmarkTitle: bookmark.title,
         bookmarkUrl: bookmark.url
       }).catch(() => {});
+
       const fallbackDetail = {
         suggestedCategory: "其他",
         confidence: 0.2,
@@ -1173,18 +1216,31 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
         usedDomainRule: false,
         domain: extractDomain(bookmark.url)
       };
+
       try {
         await applyBookmarkClassification(bookmark.id, bookmark.url, bookmark.title, fallbackDetail);
         moved += 1;
       } catch (moveErr) {
-        console.warn("文件夹重整移动失败:", bookmark.url, moveErr);
+        if (isBookmarkNotFoundError(moveErr)) {
+          appendDiagnosticError(moveErr, {
+            module: "background",
+            action: "reorganizeBookmarksInFolder",
+            stage: "fallback_move_missing",
+            folderName,
+            bookmarkTitle: bookmark.title,
+            bookmarkUrl: bookmark.url
+          }).catch(() => {});
+          continue;
+        }
+
+        console.warn("文件夹重整移动失败", bookmark.url, moveErr);
         errorCount += 1;
         lastError = buildRecheckError(moveErr, "回退移动", folderName, bookmark);
         appendDiagnosticError(moveErr, {
           module: "background",
           action: "reorganizeBookmarksInFolder",
           stage: "fallback_move",
-          folderName: folderName,
+          folderName,
           bookmarkTitle: bookmark.title,
           bookmarkUrl: bookmark.url
         }).catch(() => {});
@@ -1207,7 +1263,6 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
     lastError
   };
 }
-
 async function getAutoReorganizeFolders() {
   const tree = await getBookmarkTree();
   const folders = [];
