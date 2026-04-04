@@ -1,19 +1,30 @@
-# 更新日志 Changelog
+# Changelog
+
+## 2026-04-04
+
+### Improved
+
+- Added an "Error Diagnostics" panel with refresh, clear, and copy-latest actions.
+- Copy payload now includes error id, module, action, stage, bookmark info, URL, and stack snippet for fast triage.
+- Added popup-side error reporting for key user flows (start organize, folder load, pending load, AI search, manual classify, init).
+- Added background message handlers: `getErrorDiagnostics`, `clearErrorDiagnostics`, and `reportClientError`.
+- Added global background fallback capture for `unhandledrejection` and `error` events.
+- Added diagnostics tracing in AI search and real-time bookmark classification flows.
 
 ## 2026-04-03
 
-### 修复 Fixed
+### Fixed
 
-- 修复“全量一键整理”对子目录书签的误判：路径任一层命中分类目录即视为已分类，不再被重复搬运。
-- 修复“全量一键整理”批次失败时仍提示全部完成的问题，新增失败计数与明确的部分失败提示。
-- 为分类相关 DeepSeek API 请求增加超时控制，避免网络异常导致任务长时间卡住。
-- 修复 recentLogs 并发写入的覆盖风险，改为串行写入队列，减少日志丢失。
+- Fixed false positives in full organize: bookmarks under any known category path segment are treated as already categorized.
+- Fixed batch-failure reporting in full organize to show partial failures explicitly.
+- Added timeout control for DeepSeek API calls to avoid long hangs on unstable networks.
+- Reduced recent log loss risk by using serialized writes.
 
 ## 2026-04-02
 
-### 修复 Fixed
+### Fixed
 
-- 修复“待人工分类”中偶发 `Can't find bookmark for id.` 报错。
-- 为失效书签 ID（书签已移动或删除）增加后台兜底，返回友好错误提示。
-- 手动归类流程在 `move/update` 阶段补充异常处理，避免原始 Chrome 错误直出。
-- Popup 在遇到失效书签时会自动移除该条目并刷新待人工分类列表。
+- Fixed intermittent `Can't find bookmark for id.` errors in pending manual classification.
+- Added backend fallback handling for stale/missing bookmark IDs after move/delete.
+- Hardened manual classify `move/update` error handling to avoid raw Chrome error leakage.
+- Popup now auto-removes stale pending entries and refreshes the pending list.

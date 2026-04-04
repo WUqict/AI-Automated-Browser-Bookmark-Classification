@@ -68,7 +68,14 @@
                 <div id="organizeMsg" class="save-msg text-highlight"></div>
 
                 <div class="section mt-8">
-                    <label>📂 文件夹重整（自动扫描全部文件夹）</label>
+                    <label>📂 文件夹重整</label>
+                    <div class="folder-recheck-row">
+                        <select id="folderSelect">
+                            <option value="">正在加载文件夹...</option>
+                        </select>
+                        <button id="refreshFolderListBtn" class="btn-ghost" type="button">刷新</button>
+                    </div>
+                    <button id="singleFolderRecheckBtn" class="btn-secondary mt-8">🎯 重整选中文件夹</button>
                     <button id="folderRecheckBtn" class="btn-secondary mt-8">♻️ 一键重整全部文件夹</button>
                     <div id="folderRecheckMsg" class="save-msg text-highlight"></div>
                 </div>
@@ -80,6 +87,20 @@
             <label>最近分类记录</label>
             <div id="logList" class="log-list">
                 <p class="empty">暂无记录</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="mini-header">
+                <label>🐞 错误诊断（快速定位）</label>
+                <div class="inline-actions">
+                    <button id="copyLatestErrorBtn" class="btn-link" type="button">复制最新</button>
+                    <button id="refreshErrorBtn" class="btn-link" type="button">刷新</button>
+                    <button id="clearErrorBtn" class="btn-link" type="button">清空</button>
+                </div>
+            </div>
+            <div id="errorList" class="log-list error-list">
+                <p class="empty">暂无错误记录</p>
             </div>
         </div>
 

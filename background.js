@@ -15,6 +15,7 @@ const RULE_MIN_SAMPLES = 5;
 const RULE_MIN_RATIO = 0.8;
 const MAX_PENDING_FETCH = 60;
 const API_REQUEST_TIMEOUT_MS = 20000;
+const MAX_ERROR_DIAGNOSTICS = 80;
 
 // ============ 获取设置 ============
 async function getSettings() {
@@ -322,7 +323,7 @@ function normalizeAiResult(rawResult, categories, title) {
   };
 }
 
-async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIMEOUT_MS, context = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -337,8 +338,22 @@ async function requestDeepSeekChat(apiKey, payload, timeoutMs = API_REQUEST_TIME
     });
   } catch (err) {
     if (err?.name === "AbortError") {
-      throw new Error("请求超时，请稍后重试");
+      const timeoutErr = new Error("请求超时，请稍后重试");
+      await appendDiagnosticError(timeoutErr, {
+        module: "background",
+        action: "deepseek_request",
+        stage: "timeout",
+        details: `timeout_ms=${timeoutMs}`,
+        ...context
+      });
+      throw timeoutErr;
     }
+    await appendDiagnosticError(err, {
+      module: "background",
+      action: "deepseek_request",
+      stage: "network",
+      ...context
+    });
     throw err;
   } finally {
     clearTimeout(timeoutId);
@@ -383,11 +398,18 @@ ${JSON.stringify({
     ],
     temperature: 0.1,
     response_format: { type: "json_object" }
-  });
+  }, API_REQUEST_TIMEOUT_MS, { action: "classifyBookmark", stage: "llm" });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    const apiErr = new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    await appendDiagnosticError(apiErr, {
+      module: "background",
+      action: "classifyBookmark",
+      stage: "http_error",
+      details: `status=${response.status}`
+    });
+    throw apiErr;
   }
 
   const data = await response.json();
@@ -417,11 +439,18 @@ ${catStr}
     ],
     temperature: 0.1,
     response_format: { type: "json_object" }
-  });
+  }, API_REQUEST_TIMEOUT_MS, { action: "classifyBookmarkFallback", stage: "llm" });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    const apiErr = new Error(`API ${response.status}: ${errText.substring(0, 200)}`);
+    await appendDiagnosticError(apiErr, {
+      module: "background",
+      action: "classifyBookmarkFallback",
+      stage: "http_error",
+      details: `status=${response.status}`
+    });
+    throw apiErr;
   }
 
   const data = await response.json();
@@ -448,6 +477,96 @@ function getErrorMessage(err) {
   return err.message || String(err);
 }
 
+let diagnosticWriteQueue = Promise.resolve();
+
+function buildDiagnosticError(err, context = {}) {
+  const message = cleanText(getErrorMessage(err) || "未知错误");
+  const stackText = cleanText(typeof err?.stack === "string" ? err.stack.split("\n").slice(0, 3).join(" | ") : "");
+  const safeContext = {
+    module: cleanText(context.module || "background"),
+    action: cleanText(context.action || "unknown"),
+    stage: cleanText(context.stage || ""),
+    folderName: cleanText(context.folderName || ""),
+    bookmarkTitle: cleanText(context.bookmarkTitle || ""),
+    bookmarkUrl: cleanText(context.bookmarkUrl || ""),
+    details: cleanText(context.details || ""),
+    senderTabId: cleanText(context.senderTabId || "")
+  };
+
+  const summaryParts = [
+    `模块:${safeContext.module}`,
+    `动作:${safeContext.action}`
+  ];
+  if (safeContext.stage) summaryParts.push(`阶段:${safeContext.stage}`);
+  if (safeContext.folderName) summaryParts.push(`文件夹:${safeContext.folderName}`);
+  if (safeContext.bookmarkTitle) summaryParts.push(`书签:${safeContext.bookmarkTitle}`);
+  if (safeContext.bookmarkUrl) summaryParts.push(`URL:${safeContext.bookmarkUrl}`);
+  if (safeContext.details) summaryParts.push(`补充:${safeContext.details}`);
+  if (safeContext.senderTabId) summaryParts.push(`Tab:${safeContext.senderTabId}`);
+  if (stackText) summaryParts.push(`Stack:${stackText}`);
+  summaryParts.push(`错误:${message}`);
+
+  return {
+    id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    time: new Date().toLocaleString(),
+    message,
+    stack: stackText,
+    summary: summaryParts.join(" | "),
+    ...safeContext
+  };
+}
+async function appendDiagnosticError(err, context = {}) {
+  const event = buildDiagnosticError(err, context);
+  diagnosticWriteQueue = diagnosticWriteQueue
+    .then(async () => {
+      const { diagnosticErrors = [] } = await getLocalSettings({ diagnosticErrors: [] });
+      const next = [event, ...diagnosticErrors].slice(0, MAX_ERROR_DIAGNOSTICS);
+      await new Promise((resolve) => chrome.storage.local.set({ diagnosticErrors: next }, resolve));
+    })
+    .catch((queueErr) => {
+      console.warn("写入 diagnosticErrors 失败:", queueErr);
+    });
+  await diagnosticWriteQueue;
+  return event;
+}
+
+async function getDiagnosticErrors(limit = 30) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 30, MAX_ERROR_DIAGNOSTICS));
+  const { diagnosticErrors = [] } = await getLocalSettings({ diagnosticErrors: [] });
+  return diagnosticErrors.slice(0, safeLimit);
+}
+
+async function clearDiagnosticErrors() {
+  await new Promise((resolve) => chrome.storage.local.set({ diagnosticErrors: [] }, resolve));
+}
+
+function reportDiagnosticError(err, context = {}) {
+  return appendDiagnosticError(err, {
+    module: "background",
+    ...context
+  }).catch(() => {});
+}
+
+self.addEventListener("unhandledrejection", (event) => {
+  const reason = event?.reason;
+  const normalizedErr = reason instanceof Error ? reason : new Error(cleanText(reason || "unhandled_rejection"));
+  reportDiagnosticError(normalizedErr, {
+    action: "global_unhandledrejection",
+    stage: "runtime"
+  });
+});
+
+self.addEventListener("error", (event) => {
+  const runtimeErr = event?.error instanceof Error
+    ? event.error
+    : new Error(cleanText(event?.message || "runtime_error"));
+  reportDiagnosticError(runtimeErr, {
+    action: "global_error",
+    stage: "runtime",
+    details: `${event?.filename || "unknown"}:${event?.lineno || 0}:${event?.colno || 0}`
+  });
+});
+
 function isBookmarkNotFoundError(err) {
   const msg = getErrorMessage(err).toLowerCase();
   return (
@@ -455,6 +574,30 @@ function isBookmarkNotFoundError(err) {
     msg.includes("cannot find bookmark for id") ||
     (msg.includes("bookmark") && msg.includes("id") && msg.includes("find"))
   );
+}
+
+function buildRecheckError(err, stage, folderName = "", bookmark = null) {
+  const message = cleanText(getErrorMessage(err) || "未知错误");
+  const safeStage = cleanText(stage || "未知阶段");
+  const safeFolderName = cleanText(folderName || "");
+  const bookmarkTitle = cleanText(bookmark?.title || "");
+  const bookmarkUrl = cleanText(bookmark?.url || "");
+
+  const summaryParts = [`阶段:${safeStage}`];
+  if (safeFolderName) summaryParts.push(`文件夹:${safeFolderName}`);
+  if (bookmarkTitle) summaryParts.push(`书签:${bookmarkTitle}`);
+  else if (bookmarkUrl) summaryParts.push(`URL:${bookmarkUrl}`);
+  summaryParts.push(`错误:${message}`);
+
+  return {
+    stage: safeStage,
+    folderName: safeFolderName,
+    bookmarkTitle,
+    bookmarkUrl,
+    message,
+    summary: summaryParts.join(" | "),
+    time: new Date().toLocaleString()
+  };
 }
 
 async function getBookmarkNode(id) {
@@ -785,6 +928,12 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
         }
       } catch (err) {
         console.error("AI MarkMaster 实时分类失败:", err);
+        reportDiagnosticError(err, {
+          action: "onBookmarkCreated",
+          stage: "classify_or_move",
+          bookmarkTitle: latestBm.title,
+          bookmarkUrl: latestBm.url
+        });
         notify("❌ 分类失败", err.message?.substring(0, 100) || "未知错误");
         await addLog({
           time: new Date().toLocaleString(),
@@ -799,6 +948,10 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
     });
 
   } catch (err) {
+    reportDiagnosticError(err, {
+      action: "onBookmarkCreated",
+      stage: "listener_root"
+    });
     processingIds.delete(id);
   }
 });
@@ -858,8 +1011,9 @@ async function doFullOrganize() {
   const BATCH_SIZE = 20;
   let processedCount = 0;
   let failedCount = 0;
+  let lastError = null;
 
-  updateProgress({ isProcessing: true, message: `开始处理...`, progress: 0, total });
+  updateProgress({ isProcessing: true, message: `开始处理...`, progress: 0, total, failed: 0, lastError: null });
 
   for (let i = 0; i < total; i += BATCH_SIZE) {
     const batch = bookmarks.slice(i, i + BATCH_SIZE);
@@ -881,6 +1035,11 @@ async function doFullOrganize() {
         messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
         temperature: 0.1,
         response_format: { type: "json_object" }
+      }, API_REQUEST_TIMEOUT_MS, {
+        module: "background",
+        action: "doFullOrganize",
+        stage: "batch_llm_request",
+        details: `batch=${i + 1}-${i + batch.length}`
       });
 
       if (!res.ok) throw new Error(`API ${res.status}`);
@@ -901,6 +1060,14 @@ async function doFullOrganize() {
           if (nTitle !== bm.title) await updateBookmarkTitle(bm.id, nTitle);
         } catch (e) {
           failedCount += 1;
+          lastError = buildRecheckError(e, "历史整理-移动书签", "", bm);
+          appendDiagnosticError(e, {
+            module: "background",
+            action: "doFullOrganize",
+            stage: "move_bookmark",
+            bookmarkTitle: bm.title,
+            bookmarkUrl: bm.url
+          }).catch(() => {});
           console.warn("移动书签失败", bm.url, e);
         }
 
@@ -910,21 +1077,37 @@ async function doFullOrganize() {
           message: failedCount > 0 ? `🚀 正在清洗书签...（失败 ${failedCount}）` : "🚀 正在清洗书签...",
           progress: processedCount,
           total,
-          failed: failedCount
+          failed: failedCount,
+          lastError
         });
       }
 
     } catch (err) {
       console.error("批处理失败", err);
+      appendDiagnosticError(err, {
+        module: "background",
+        action: "doFullOrganize",
+        stage: "batch_failed",
+        details: `batch=${i + 1}-${i + batch.length}`
+      }).catch(() => {});
       // 若某批失败，记录失败数量并推进进度，最终明确提示“部分失败”
       failedCount += batch.length;
       processedCount += batch.length;
+      lastError = {
+        stage: "历史整理-批处理请求",
+        message: cleanText(getErrorMessage(err) || "未知错误"),
+        summary: `阶段:历史整理-批处理请求 | 批次:${i + 1}-${i + batch.length} | 错误:${cleanText(getErrorMessage(err) || "未知错误")}`,
+        batchStart: i + 1,
+        batchEnd: i + batch.length,
+        time: new Date().toLocaleString()
+      };
       updateProgress({
         isProcessing: true,
         message: `⚠️ 批处理失败，已跳过 ${batch.length} 条（累计失败 ${failedCount}）`,
         progress: processedCount,
         total,
-        failed: failedCount
+        failed: failedCount,
+        lastError
       });
     }
   }
@@ -933,7 +1116,7 @@ async function doFullOrganize() {
   const finishMsg = failedCount > 0
     ? `⚠️ 整理完成：成功 ${successCount}，失败 ${failedCount}`
     : `🎉 历史书签已全部分类完毕！共处理 ${total} 条`;
-  updateProgress({ isProcessing: false, message: finishMsg, progress: total, total, failed: failedCount });
+  updateProgress({ isProcessing: false, message: finishMsg, progress: total, total, failed: failedCount, lastError });
   notify(failedCount > 0 ? "⚠️ 整理完成（部分失败）" : "✅ 整理完成", finishMsg);
 }
 
@@ -941,6 +1124,9 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
   let kept = 0;
   let moved = 0;
   let pending = 0;
+  let errorCount = 0;
+  let lastError = null;
+  const folderName = cleanText(folder?.title || "未命名文件夹");
 
   for (const bookmark of bookmarks) {
     try {
@@ -964,6 +1150,16 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
     } catch (err) {
       console.warn("文件夹重整分类失败:", bookmark.url, err);
       pending += 1;
+      errorCount += 1;
+      lastError = buildRecheckError(err, "分类判定", folderName, bookmark);
+      appendDiagnosticError(err, {
+        module: "background",
+        action: "reorganizeBookmarksInFolder",
+        stage: "classify",
+        folderName: folderName,
+        bookmarkTitle: bookmark.title,
+        bookmarkUrl: bookmark.url
+      }).catch(() => {});
       const fallbackDetail = {
         suggestedCategory: "其他",
         confidence: 0.2,
@@ -982,39 +1178,60 @@ async function reorganizeBookmarksInFolder(folder, bookmarks, settings, categori
         moved += 1;
       } catch (moveErr) {
         console.warn("文件夹重整移动失败:", bookmark.url, moveErr);
+        errorCount += 1;
+        lastError = buildRecheckError(moveErr, "回退移动", folderName, bookmark);
+        appendDiagnosticError(moveErr, {
+          module: "background",
+          action: "reorganizeBookmarksInFolder",
+          stage: "fallback_move",
+          folderName: folderName,
+          bookmarkTitle: bookmark.title,
+          bookmarkUrl: bookmark.url
+        }).catch(() => {});
       }
     } finally {
       if (typeof onItemDone === "function") {
-        onItemDone({ folder, kept, moved, pending });
+        onItemDone({ folder, kept, moved, pending, errorCount, lastError });
       }
     }
   }
 
   return {
     folderId: folder.id,
-    folderName: folder.title || "未命名文件夹",
+    folderName: folderName || "未命名文件夹",
     total: bookmarks.length,
     kept,
     moved,
-    pending
+    pending,
+    errorCount,
+    lastError
   };
 }
 
 async function getAutoReorganizeFolders() {
-  const roots = ["1", "2", "3"];
+  const tree = await getBookmarkTree();
   const folders = [];
-  for (const rootId of roots) {
-    try {
-      const children = await getBookmarksChildren(rootId);
-      for (const child of children) {
-        if (!child.url && child.title !== LOW_CONFIDENCE_FOLDER) {
-          folders.push(child);
-        }
+  const rootIds = new Set(["0", "1", "2", "3"]);
+
+  function walk(node) {
+    if (!node || node.url) return;
+
+    if (node.id && !rootIds.has(node.id)) {
+      const title = cleanText(node.title || "");
+      if (title !== LOW_CONFIDENCE_FOLDER) {
+        folders.push({ id: node.id, title: node.title || "未命名文件夹" });
       }
-    } catch (err) {
-      console.warn("读取根文件夹失败:", rootId, err);
+    }
+
+    for (const child of (node.children || [])) {
+      walk(child);
     }
   }
+
+  for (const root of tree) {
+    walk(root);
+  }
+
   return folders;
 }
 
@@ -1041,6 +1258,8 @@ async function doFolderReorganize(folderId) {
   let kept = 0;
   let moved = 0;
   let pending = 0;
+  let errorCount = 0;
+  let lastError = null;
 
   updateFolderRecheckState({
     isProcessing: true,
@@ -1052,7 +1271,9 @@ async function doFolderReorganize(folderId) {
     total,
     kept,
     moved,
-    pending
+    pending,
+    errorCount,
+    lastError
   });
 
   const result = await reorganizeBookmarksInFolder(
@@ -1060,11 +1281,13 @@ async function doFolderReorganize(folderId) {
     bookmarks,
     settings,
     categories,
-    ({ kept: localKept, moved: localMoved, pending: localPending }) => {
+    ({ kept: localKept, moved: localMoved, pending: localPending, errorCount: localErrorCount, lastError: localLastError }) => {
       processed += 1;
       kept = localKept;
       moved = localMoved;
       pending = localPending;
+      errorCount = localErrorCount || 0;
+      lastError = localLastError || lastError;
       updateFolderRecheckState({
         isProcessing: true,
         mode: "single",
@@ -1075,12 +1298,16 @@ async function doFolderReorganize(folderId) {
         total,
         kept,
         moved,
-        pending
+        pending,
+        errorCount,
+        lastError
       });
     }
   );
 
-  const finishMsg = `✅ 重整完成：保留 ${result.kept}，重分 ${result.moved}，待人工 ${result.pending}`;
+  const finishMsg = result.errorCount > 0
+    ? `⚠️ 重整完成：保留 ${result.kept}，重分 ${result.moved}，待人工 ${result.pending}，错误 ${result.errorCount}`
+    : `✅ 重整完成：保留 ${result.kept}，重分 ${result.moved}，待人工 ${result.pending}`;
   updateFolderRecheckState({
     isProcessing: false,
     mode: "single",
@@ -1091,9 +1318,11 @@ async function doFolderReorganize(folderId) {
     total,
     kept: result.kept,
     moved: result.moved,
-    pending: result.pending
+    pending: result.pending,
+    errorCount: result.errorCount || 0,
+    lastError: result.lastError || null
   });
-  notify("✅ 文件夹重整完成", finishMsg);
+  notify(result.errorCount > 0 ? "⚠️ 文件夹重整完成（有错误）" : "✅ 文件夹重整完成", finishMsg);
 }
 
 async function doAllFoldersReorganize() {
@@ -1113,19 +1342,38 @@ async function doAllFoldersReorganize() {
 
   const jobs = [];
   let total = 0;
+  let errorCount = 0;
+  let lastError = null;
   for (const folder of folders) {
-    const bookmarks = await getBookmarksInFolder(folder.id);
-    if (bookmarks.length > 0) {
-      jobs.push({ folder, bookmarks });
-      total += bookmarks.length;
+    try {
+      const bookmarks = await getBookmarksInFolder(folder.id);
+      if (bookmarks.length > 0) {
+        jobs.push({ folder, bookmarks });
+        total += bookmarks.length;
+      }
+    } catch (err) {
+      errorCount += 1;
+      lastError = buildRecheckError(err, "扫描文件夹", folder.title || "未命名文件夹");
+      appendDiagnosticError(err, {
+        module: "background",
+        action: "doAllFoldersReorganize",
+        stage: "scan_folder",
+        folderName: folder.title || "未命名文件夹"
+      }).catch(() => {});
+      console.warn("扫描可重整文件夹失败:", folder.id, err);
     }
   }
 
   if (jobs.length === 0) {
+    const emptyMsg = errorCount > 0
+      ? `⚠️ 未找到可重整书签（扫描错误 ${errorCount}）`
+      : "🎉 所有文件夹都没有可重整书签";
     updateFolderRecheckState({
       isProcessing: false,
       mode: "all",
-      message: "🎉 所有文件夹都没有可重整书签"
+      message: emptyMsg,
+      errorCount,
+      lastError
     });
     return;
   }
@@ -1145,6 +1393,8 @@ async function doAllFoldersReorganize() {
     kept,
     moved,
     pending,
+    errorCount,
+    lastError,
     folderDone,
     folderTotal: jobs.length
   });
@@ -1153,17 +1403,21 @@ async function doAllFoldersReorganize() {
     let folderLocalKept = 0;
     let folderLocalMoved = 0;
     let folderLocalPending = 0;
+    let folderLocalErrorCount = 0;
+    let folderLocalLastError = null;
 
     const res = await reorganizeBookmarksInFolder(
       job.folder,
       job.bookmarks,
       settings,
       categories,
-      ({ kept: localKept, moved: localMoved, pending: localPending }) => {
+      ({ kept: localKept, moved: localMoved, pending: localPending, errorCount: localErrorCount, lastError: localLastError }) => {
         processed += 1;
         folderLocalKept = localKept;
         folderLocalMoved = localMoved;
         folderLocalPending = localPending;
+        folderLocalErrorCount = localErrorCount || 0;
+        folderLocalLastError = localLastError || folderLocalLastError;
 
         updateFolderRecheckState({
           isProcessing: true,
@@ -1174,6 +1428,8 @@ async function doAllFoldersReorganize() {
           kept: kept + folderLocalKept,
           moved: moved + folderLocalMoved,
           pending: pending + folderLocalPending,
+          errorCount: errorCount + folderLocalErrorCount,
+          lastError: folderLocalLastError || lastError,
           folderDone,
           folderTotal: jobs.length,
           currentFolder: job.folder.title || "未命名文件夹"
@@ -1184,6 +1440,10 @@ async function doAllFoldersReorganize() {
     kept += res.kept;
     moved += res.moved;
     pending += res.pending;
+    errorCount += res.errorCount || 0;
+    if (res.lastError) {
+      lastError = res.lastError;
+    }
     folderDone += 1;
     updateFolderRecheckState({
       isProcessing: true,
@@ -1194,13 +1454,17 @@ async function doAllFoldersReorganize() {
       kept,
       moved,
       pending,
+      errorCount,
+      lastError,
       folderDone,
       folderTotal: jobs.length,
       currentFolder: job.folder.title || "未命名文件夹"
     });
   }
 
-  const finishMsg = `✅ 全部文件夹重整完成：保留 ${kept}，重分 ${moved}，待人工 ${pending}`;
+  const finishMsg = errorCount > 0
+    ? `⚠️ 全部文件夹重整完成：保留 ${kept}，重分 ${moved}，待人工 ${pending}，错误 ${errorCount}`
+    : `✅ 全部文件夹重整完成：保留 ${kept}，重分 ${moved}，待人工 ${pending}`;
   updateFolderRecheckState({
     isProcessing: false,
     mode: "all",
@@ -1210,10 +1474,12 @@ async function doAllFoldersReorganize() {
     kept,
     moved,
     pending,
+    errorCount,
+    lastError,
     folderDone: jobs.length,
     folderTotal: jobs.length
   });
-  notify("✅ 全部文件夹重整完成", finishMsg);
+  notify(errorCount > 0 ? "⚠️ 全部文件夹重整完成（有错误）" : "✅ 全部文件夹重整完成", finishMsg);
 }
 
 async function getPendingBookmarks(limit = MAX_PENDING_FETCH) {
@@ -1293,22 +1559,78 @@ async function manualClassifyBookmark(bookmarkId, category, newTitle = "") {
 
 // 接收来自 Popup 的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "getErrorDiagnostics") {
+    getDiagnosticErrors(request.limit || 30)
+      .then((errors) => sendResponse({ errors }))
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "getErrorDiagnostics",
+          stage: "read_storage"
+        });
+        sendResponse({ error: err.message });
+      });
+    return true;
+  }
+
+  if (request.action === "clearErrorDiagnostics") {
+    clearDiagnosticErrors()
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "clearErrorDiagnostics",
+          stage: "write_storage"
+        });
+        sendResponse({ error: err.message });
+      });
+    return true;
+  }
+
+  if (request.action === "reportClientError") {
+    const err = new Error(request.errorMessage || "client_error");
+    appendDiagnosticError(err, {
+      module: cleanText(request.module || "popup"),
+      action: cleanText(request.actionName || "client_error"),
+      stage: cleanText(request.stage || "runtime"),
+      details: cleanText(request.details || ""),
+      folderName: cleanText(request.folderName || ""),
+      bookmarkTitle: cleanText(request.bookmarkTitle || ""),
+      bookmarkUrl: cleanText(request.bookmarkUrl || ""),
+      senderTabId: sender?.tab?.id ? String(sender.tab.id) : ""
+    })
+      .then((event) => sendResponse({ success: true, id: event?.id || "" }))
+      .catch((writeErr) => sendResponse({ error: writeErr.message || "report_failed" }));
+    return true;
+  }
+
   if (request.action === "startFullOrganize") {
     chrome.storage.local.get("processingState", (items) => {
       if (items.processingState && items.processingState.isProcessing) {
-        sendResponse({ error: "已经在处理中了，请稍候。" });
+        sendResponse({ error: "已有任务正在处理中，请稍候" });
         return;
       }
-      doFullOrganize().catch(err => {
+      doFullOrganize().catch((err) => {
+        reportDiagnosticError(err, {
+          action: "startFullOrganize",
+          stage: "task_failed"
+        });
         updateProgress({ isProcessing: false, message: `❌ 失败: ${err.message}` });
       });
       sendResponse({ status: "started" });
     });
-    return true; // 保持异步响应
+    return true;
   }
 
   if (request.action === "aiSearch") {
-    handleAiSearch(request.query).then(results => sendResponse({ results })).catch(err => sendResponse({ error: err.message }));
+    handleAiSearch(request.query)
+      .then((results) => sendResponse({ results }))
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "aiSearch",
+          stage: "request",
+          details: cleanText(request.query || "").slice(0, 200)
+        });
+        sendResponse({ error: err.message });
+      });
     return true;
   }
 
@@ -1320,6 +1642,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
 
       doAllFoldersReorganize().catch((err) => {
+        reportDiagnosticError(err, {
+          action: "startAllFoldersReorganize",
+          stage: "task_failed"
+        });
         updateFolderRecheckState({
           isProcessing: false,
           mode: "all",
@@ -1345,6 +1671,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
 
       doFolderReorganize(folderId).catch((err) => {
+        reportDiagnosticError(err, {
+          action: "startFolderReorganize",
+          stage: "task_failed",
+          details: `folderId=${folderId}`
+        });
         updateFolderRecheckState({
           isProcessing: false,
           folderId,
@@ -1356,21 +1687,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === "getFolderOptions") {
+    getAllFolderOptions(request.limit || 400)
+      .then((folders) => {
+        const selectableFolders = (folders || []).filter((folder) => {
+          if (!folder?.id) return false;
+          if (["1", "2", "3"].includes(folder.id)) return false;
+          return cleanText(folder.title) !== LOW_CONFIDENCE_FOLDER;
+        });
+        sendResponse({ folders: selectableFolders });
+      })
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "getFolderOptions",
+          stage: "fetch_options"
+        });
+        sendResponse({ error: err.message });
+      });
+    return true;
+  }
+
   if (request.action === "getPendingBookmarks") {
     getPendingBookmarks(request.limit || MAX_PENDING_FETCH)
       .then((bookmarks) => sendResponse({ bookmarks }))
-      .catch((err) => sendResponse({ error: err.message }));
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "getPendingBookmarks",
+          stage: "fetch_pending"
+        });
+        sendResponse({ error: err.message });
+      });
     return true;
   }
 
   if (request.action === "manualClassifyBookmark") {
     manualClassifyBookmark(request.bookmarkId, request.category, request.newTitle || "")
       .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ error: err.message }));
+      .catch((err) => {
+        reportDiagnosticError(err, {
+          action: "manualClassifyBookmark",
+          stage: "manual_apply",
+          details: `bookmarkId=${cleanText(request.bookmarkId || "")}`
+        });
+        sendResponse({ error: err.message });
+      });
     return true;
   }
-});
 
+  return false;
+});
 async function handleAiSearch(query) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error("请先填写 API Key");
@@ -1443,6 +1808,11 @@ async function handleAiSearch(query) {
 
         resolve(content.results || []);
       } catch (err) {
+        reportDiagnosticError(err, {
+          action: "handleAiSearch",
+          stage: "fetch_or_parse",
+          details: cleanText(query || "").slice(0, 200)
+        });
         if (err.name === 'AbortError') {
           reject(new Error("请求超时，请检查网络或稍后重试"));
         } else {

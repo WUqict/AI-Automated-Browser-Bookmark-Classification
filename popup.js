@@ -24,6 +24,9 @@ const $organizeBtn = document.getElementById("organizeBtn");
 const $organizeMsg = document.getElementById("organizeMsg");
 
 const $folderRecheckBtn = document.getElementById("folderRecheckBtn");
+const $singleFolderRecheckBtn = document.getElementById("singleFolderRecheckBtn");
+const $folderSelect = document.getElementById("folderSelect");
+const $refreshFolderListBtn = document.getElementById("refreshFolderListBtn");
 const $folderRecheckMsg = document.getElementById("folderRecheckMsg");
 
 const $recentHistoryList = document.getElementById("recentHistoryList");
@@ -31,11 +34,17 @@ const $refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
 
 const $pendingList = document.getElementById("pendingList");
 const $refreshPendingBtn = document.getElementById("refreshPendingBtn");
+const $errorList = document.getElementById("errorList");
+const $refreshErrorBtn = document.getElementById("refreshErrorBtn");
+const $clearErrorBtn = document.getElementById("clearErrorBtn");
+const $copyLatestErrorBtn = document.getElementById("copyLatestErrorBtn");
 
 let categoriesCache = [...DEFAULT_CATEGORIES];
 let allBookmarksCache = [];
 let searchDebounceTimer = null;
 let lastSearchItems = [];
+let folderOptionsCache = [];
+let latestErrorDiagnostics = [];
 
 function sendRuntimeMessage(payload) {
     return new Promise((resolve, reject) => {
@@ -74,6 +83,23 @@ function showMsg(text, isError = false) {
     $saveMsg.textContent = text;
     $saveMsg.style.color = isError ? "#e74c3c" : "#3f658f";
     setTimeout(() => { $saveMsg.textContent = ""; }, 2200);
+}
+
+function reportClientError(err, context = {}) {
+    const payload = {
+        action: "reportClientError",
+        errorMessage: String(err?.message || err || "unknown_error"),
+        module: "popup",
+        ...context
+    };
+    try {
+        chrome.runtime.sendMessage(payload, () => {
+            // ignore response errors to avoid recursive reporting loops
+            void chrome.runtime.lastError;
+        });
+    } catch (_e) {
+        // ignore
+    }
 }
 
 function isBookmarkNotFoundError(err) {
@@ -351,6 +377,7 @@ $aiSearchBtn.addEventListener("click", async () => {
         }
     } catch (err) {
         $aiSearchResults.innerHTML = `<p class="empty text-error">❌ ${escapeHtml(err.message || "请求失败")}</p>`;
+        reportClientError(err, { actionName: "aiSearch", stage: "request", details: query });
     } finally {
         $aiSearchBtn.disabled = false;
         $aiSearchBtn.textContent = "✨ 呼叫 AI 帮我找";
@@ -406,6 +433,7 @@ async function loadRecentHistory() {
         renderRecentHistory(sorted);
     } catch (err) {
         $recentHistoryList.innerHTML = `<p class="empty text-error">❌ ${escapeHtml(err.message || "读取历史失败")}</p>`;
+        reportClientError(err, { actionName: "loadRecentHistory", stage: "history_api" });
     }
 }
 
@@ -469,15 +497,46 @@ function renderLogs(logs) {
         .join("");
 }
 
+function renderErrorDiagnostics(errors) {
+    latestErrorDiagnostics = Array.isArray(errors) ? errors : [];
+    if (latestErrorDiagnostics.length === 0) {
+        $errorList.innerHTML = '<p class="empty">暂无错误记录</p>';
+        return;
+    }
+
+    $errorList.innerHTML = latestErrorDiagnostics.map((item) => `
+        <div class="error-item">
+            <div class="error-main">${escapeHtml(item.summary || item.message || "未知错误")}</div>
+            <div class="error-meta">${escapeHtml(`#${item.id || "-"} · ${item.time || ""}`)}</div>
+            <div class="error-meta">${escapeHtml(`${item.module || ""}/${item.action || ""}/${item.stage || ""}`)}</div>
+        </div>
+    `).join("");
+}
+
+async function loadErrorDiagnostics() {
+    $errorList.innerHTML = '<p class="empty">正在加载错误诊断...</p>';
+    try {
+        const response = await sendRuntimeMessage({ action: "getErrorDiagnostics", limit: 40 });
+        renderErrorDiagnostics(response.errors || []);
+    } catch (err) {
+        $errorList.innerHTML = `<p class="empty text-error">❌ ${escapeHtml(err.message || "加载错误诊断失败")}</p>`;
+        reportClientError(err, { actionName: "loadErrorDiagnostics", stage: "fetch" });
+    }
+}
+
 function updateOrganizeBtn(state) {
+    const failed = Number(state?.failed || 0);
+    const latestErrorSummary = state?.lastError?.summary ? ` 最近错误: ${state.lastError.summary}` : "";
     if (!state || !state.isProcessing) {
         $organizeBtn.disabled = false;
         $organizeBtn.textContent = "🧹 一键整理历史旧书签";
-        $organizeMsg.textContent = state?.message || "";
+        const failedText = failed > 0 ? ` 失败:${failed}` : "";
+        $organizeMsg.textContent = `${state?.message || ""}${failedText}${latestErrorSummary}`;
     } else {
         $organizeBtn.disabled = true;
         $organizeBtn.textContent = `🚀 正在整理... ${state.progress ? `(${state.progress}/${state.total})` : ''}`;
-        $organizeMsg.textContent = state.message || "请勿关闭浏览器，可关闭此面板...";
+        const failedText = failed > 0 ? ` 失败:${failed}` : "";
+        $organizeMsg.textContent = `${state.message || "请勿关闭浏览器，可关闭此面板..."}${failedText}${latestErrorSummary}`;
     }
 }
 
@@ -491,25 +550,88 @@ $organizeBtn.addEventListener("click", () => {
     if (confirm("📢 这将会扫描并整理你浏览器中所有未分类在指定目录下的书签。可能会持续较长时间，\n确认要开始吗？")) {
         chrome.runtime.sendMessage({ action: "startFullOrganize" }, (response) => {
             if (chrome.runtime.lastError || (response && response.error)) {
-                $organizeMsg.textContent = "❌ 启动失败: " + (response?.error || chrome.runtime.lastError.message);
+                const errMsg = response?.error || chrome.runtime.lastError.message;
+                $organizeMsg.textContent = "❌ 启动失败: " + errMsg;
                 $organizeMsg.style.color = "#e74c3c";
+                reportClientError(errMsg, { actionName: "startFullOrganize", stage: "start" });
             }
         });
     }
 });
 
 function updateFolderRecheckUI(state) {
+    const errorCount = Number(state?.errorCount || 0);
+    const latestErrorSummary = state?.lastError?.summary ? ` 最近错误: ${state.lastError.summary}` : "";
     if (!state || !state.isProcessing) {
         $folderRecheckBtn.disabled = false;
         $folderRecheckBtn.textContent = "♻️ 一键重整全部文件夹";
-        $folderRecheckMsg.textContent = state?.message || "";
+        $singleFolderRecheckBtn.disabled = !$folderSelect.value;
+        $singleFolderRecheckBtn.textContent = "🎯 重整选中文件夹";
+        $folderSelect.disabled = false;
+        $refreshFolderListBtn.disabled = false;
+        const errText = errorCount > 0 ? ` 错误:${errorCount}` : "";
+        $folderRecheckMsg.textContent = `${state?.message || ""}${errText}${latestErrorSummary}`;
         return;
     }
 
     $folderRecheckBtn.disabled = true;
-    $folderRecheckBtn.textContent = `♻️ 全量重整中 ${state.progress ? `(${state.progress}/${state.total})` : ""}`;
-    const folderText = state.folderTotal ? ` 文件夹:${state.folderDone || 0}/${state.folderTotal}` : "";
-    $folderRecheckMsg.textContent = `${state.message || "处理中..."}${folderText} 保留:${state.kept || 0} 重分:${state.moved || 0} 待人工:${state.pending || 0}`;
+    $singleFolderRecheckBtn.disabled = true;
+    $folderSelect.disabled = true;
+    $refreshFolderListBtn.disabled = true;
+    $folderRecheckBtn.textContent = state.mode === "all" ? `♻️ 全量重整中 ${state.progress ? `(${state.progress}/${state.total})` : ""}` : "♻️ 一键重整全部文件夹";
+    $singleFolderRecheckBtn.textContent = state.mode === "single" ? `🎯 目标重整中 ${state.progress ? `(${state.progress}/${state.total})` : ""}` : "🎯 重整选中文件夹";
+    const folderText = state.folderTotal
+        ? ` 文件夹:${state.folderDone || 0}/${state.folderTotal}`
+        : (state.folderName ? ` 文件夹:${state.folderName}` : "");
+    const errText = errorCount > 0 ? ` 错误:${errorCount}` : "";
+    $folderRecheckMsg.textContent = `${state.message || "处理中..."}${folderText} 保留:${state.kept || 0} 重分:${state.moved || 0} 待人工:${state.pending || 0}${errText}${latestErrorSummary}`;
+}
+
+function renderFolderOptions(folders, preferredFolderId = "") {
+    folderOptionsCache = Array.isArray(folders) ? folders : [];
+    if (folderOptionsCache.length === 0) {
+        $folderSelect.innerHTML = '<option value="">未找到可重整文件夹</option>';
+        $singleFolderRecheckBtn.disabled = true;
+        return;
+    }
+
+    $folderSelect.innerHTML = folderOptionsCache
+        .map((folder) => `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.path || folder.title || "未命名文件夹")}</option>`)
+        .join("");
+
+    const hasPreferred = preferredFolderId && folderOptionsCache.some((folder) => folder.id === preferredFolderId);
+    if (hasPreferred) {
+        $folderSelect.value = preferredFolderId;
+    } else {
+        $folderSelect.selectedIndex = 0;
+    }
+    $singleFolderRecheckBtn.disabled = !$folderSelect.value;
+}
+
+async function loadFolderOptions({ preserveSelection = true } = {}) {
+    const previousFolderId = preserveSelection ? $folderSelect.value : "";
+    $folderSelect.disabled = true;
+    $refreshFolderListBtn.disabled = true;
+    $folderSelect.innerHTML = '<option value="">正在加载文件夹...</option>';
+
+    try {
+        const response = await sendRuntimeMessage({ action: "getFolderOptions", limit: 600 });
+        renderFolderOptions(response.folders || [], previousFolderId);
+    } catch (err) {
+        $folderSelect.innerHTML = `<option value="">加载失败：${escapeHtml(err.message || "未知错误")}</option>`;
+        $singleFolderRecheckBtn.disabled = true;
+        reportClientError(err, { actionName: "loadFolderOptions", stage: "request" });
+    } finally {
+        const localState = await new Promise((resolve) => {
+            chrome.storage.local.get(["folderRecheckState"], (result) => resolve(result));
+        });
+        const isProcessing = !!localState.folderRecheckState?.isProcessing;
+        $folderSelect.disabled = isProcessing;
+        $refreshFolderListBtn.disabled = isProcessing;
+        if (!isProcessing) {
+            $singleFolderRecheckBtn.disabled = !$folderSelect.value;
+        }
+    }
 }
 
 $folderRecheckBtn.addEventListener("click", async () => {
@@ -521,6 +643,81 @@ $folderRecheckBtn.addEventListener("click", async () => {
         await sendRuntimeMessage({ action: "startAllFoldersReorganize" });
     } catch (err) {
         $folderRecheckMsg.textContent = `❌ 启动失败: ${err.message || "未知错误"}`;
+        reportClientError(err, { actionName: "startAllFoldersReorganize", stage: "start" });
+    }
+});
+
+$refreshFolderListBtn.addEventListener("click", () => {
+    loadFolderOptions({ preserveSelection: true });
+});
+
+$folderSelect.addEventListener("change", () => {
+    if (!$folderSelect.disabled) {
+        $singleFolderRecheckBtn.disabled = !$folderSelect.value;
+    }
+});
+
+$singleFolderRecheckBtn.addEventListener("click", async () => {
+    const folderId = $folderSelect.value;
+    if (!folderId) {
+        $folderRecheckMsg.textContent = "⚠️ 请先选择需要重整的文件夹";
+        return;
+    }
+
+    const selectedLabel = $folderSelect.options[$folderSelect.selectedIndex]?.text || "该文件夹";
+    if (!confirm(`📂 将重整选中的文件夹：\n${selectedLabel}\n\n分类正确的保持不动，疑似错误会自动重分。\n确认开始吗？`)) {
+        return;
+    }
+
+    try {
+        await sendRuntimeMessage({ action: "startFolderReorganize", folderId });
+    } catch (err) {
+        $folderRecheckMsg.textContent = `❌ 启动失败: ${err.message || "未知错误"}`;
+        reportClientError(err, { actionName: "startFolderReorganize", stage: "start", details: folderId });
+    }
+});
+
+$refreshErrorBtn.addEventListener("click", () => {
+    loadErrorDiagnostics();
+});
+
+$clearErrorBtn.addEventListener("click", async () => {
+    try {
+        await sendRuntimeMessage({ action: "clearErrorDiagnostics" });
+        renderErrorDiagnostics([]);
+        showMsg("✅ 错误诊断已清空");
+    } catch (err) {
+        showMsg(`❌ 清空失败: ${err.message || "未知错误"}`, true);
+        reportClientError(err, { actionName: "clearErrorDiagnostics", stage: "clear" });
+    }
+});
+
+$copyLatestErrorBtn.addEventListener("click", async () => {
+    if (!latestErrorDiagnostics.length) {
+        showMsg("⚠️ 暂无可复制的错误", true);
+        return;
+    }
+    const latest = latestErrorDiagnostics[0];
+    const text = [
+        `错误ID: ${latest.id || ""}`,
+        `时间: ${latest.time || ""}`,
+        `模块: ${latest.module || ""}`,
+        `动作: ${latest.action || ""}`,
+        `阶段: ${latest.stage || ""}`,
+        latest.folderName ? `文件夹: ${latest.folderName}` : "",
+        latest.bookmarkTitle ? `书签: ${latest.bookmarkTitle}` : "",
+        latest.bookmarkUrl ? `URL: ${latest.bookmarkUrl}` : "",
+        latest.details ? `补充: ${latest.details}` : "",
+        `错误: ${latest.message || "未知错误"}`,
+        latest.stack ? `Stack: ${latest.stack}` : "",
+        `摘要: ${latest.summary || ""}`
+    ].filter(Boolean).join("\n");
+    try {
+        await navigator.clipboard.writeText(text);
+        showMsg("✅ 已复制最新错误");
+    } catch (err) {
+        showMsg("❌ 复制失败，请手动查看错误详情", true);
+        reportClientError(err, { actionName: "copyLatestError", stage: "clipboard" });
     }
 });
 
@@ -555,6 +752,7 @@ async function loadPendingBookmarks() {
         renderPendingBookmarkList(lastPendingBookmarksCache);
     } catch (err) {
         $pendingList.innerHTML = `<p class="empty text-error">❌ ${escapeHtml(err.message || "加载失败")}</p>`;
+        reportClientError(err, { actionName: "loadPendingBookmarks", stage: "request" });
     }
 }
 
@@ -605,6 +803,7 @@ $pendingList.addEventListener("click", async (e) => {
             btn.disabled = false;
             btn.textContent = "归类";
             showMsg(`❌ ${err.message || "人工分类失败"}`, true);
+            reportClientError(err, { actionName: "manualClassifyBookmark", stage: "apply", details: bookmarkId });
         }
     }
 });
@@ -618,6 +817,9 @@ chrome.storage.onChanged.addListener((changes) => {
     }
     if (changes.folderRecheckState) {
         updateFolderRecheckUI(changes.folderRecheckState.newValue);
+    }
+    if (changes.diagnosticErrors) {
+        renderErrorDiagnostics(changes.diagnosticErrors.newValue || []);
     }
 });
 
@@ -652,7 +854,9 @@ async function init() {
     await Promise.all([
         refreshBookmarkCache(),
         loadRecentHistory(),
-        loadPendingBookmarks()
+        loadFolderOptions({ preserveSelection: false }),
+        loadPendingBookmarks(),
+        loadErrorDiagnostics()
     ]);
 
     initSearchBoxBehavior();
@@ -661,4 +865,5 @@ async function init() {
 init().catch((err) => {
     console.error("Popup 初始化失败:", err);
     showMsg(`❌ 初始化失败: ${err.message || "未知错误"}`, true);
+    reportClientError(err, { actionName: "popupInit", stage: "bootstrap" });
 });
